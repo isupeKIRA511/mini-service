@@ -1,8 +1,10 @@
-import React, { useState } from 'react'
+import React, { useState, useRef } from 'react'
 import { Routes, Route, Link } from 'react-router-dom'
 import axios from 'axios'
 import api from './api/axios'
-import Hero from './components/Hero'
+import LandingScreen from './components/LandingScreen'
+import StudentDashboard from './components/StudentDashboard'
+import DriverDashboard from './components/DriverDashboard'
 
 export default function App() {
   const [authCode, setAuthCode] = useState('')
@@ -11,69 +13,38 @@ export default function App() {
   const [loading, setLoading] = useState(false)
 
   const authenticate = (afterSuccess) => {
-    if (typeof my === 'undefined') {
+    const myEnv = (typeof my !== 'undefined' ? my : null) || (window && window.my ? window.my : null)
+
+    if (!myEnv) {
       console.error('Mini-program environment not detected.')
-      alert('This function requires a mini-program environment.')
-      if (typeof afterSuccess === 'function') afterSuccess('')
+
+      alert('Mini-app environment (window.my) not found.')
       return
     }
 
-    my.getAuthCode({
+    myEnv.getAuthCode({
       scopes: ['auth_base', 'USER_ID'],
       success: (res) => {
+        console.log('getAuthCode success:', res)
         const code = res.authCode || ''
         setAuthCode(code)
-        my.showToast({ content: 'Authenticated successfully!', type: 'success' })
+
+        myEnv.showToast({ content: 'Auth Code Received', type: 'success' })
+
         if (typeof afterSuccess === 'function') afterSuccess(code)
       },
       fail: (res) => {
         console.error('getAuthCode failed', res)
-        my.alert({ content: 'Authentication failed. Please try again.' })
+        myEnv.alert({ content: 'Authentication failed: ' + JSON.stringify(res) })
       },
     })
   }
 
-  // Legacy full flow function (optional, but keeping it if needed or removing if unused)
-  const handleLoginAndPay = async () => {
-    // ... implementation can remain or be simplified since we are breaking it apart
-    // For now, I will leave it as is, or you can use the separate buttons.
-    // Let's implement the separate functions properly.
-    if (typeof my === 'undefined') {
-      alert('Mini-program environment required')
-      return
-    }
-    authenticate(async (code) => {
-      if (!code) return
-      setLoading(true)
-      const res = await postToken(code)
-      setLoading(false)
-      if (res.ok) {
-        // Extract token
-        let token = ''
-        const payload = res.payload
-        if (!payload) token = ''
-        else if (typeof payload === 'string') token = payload
-        else if (payload.token) token = payload.token
-        else if (payload.record && payload.record.token) token = payload.record.token
 
-        setServerToken(token)
-        setUserData(res.payload.record || res.payload)
-
-        // Auto pay? or just stop here? The old function did auto pay.
-        // Let's call the payment logic directly.
-        await handlePaymentOnly(token)
-      }
-    })
-  }
 
   const handlePaymentOnly = async (tokenOverride) => {
     const tokenToUse = tokenOverride || serverToken
-    // if (!tokenToUse) {
-    //     alert('Please login first to get a token.')
-    //     return
-    // }
-    // The user might want to try payment even without token if the API allows or strict checking, 
-    // but usually token is needed.
+
 
     try {
       const resp = await api.post('/payment', {}, {
@@ -117,7 +88,6 @@ export default function App() {
     setLoading(false)
 
     if (result.ok) {
-      // Extract and save token
       let token = ''
       const payload = result.payload
       if (!payload) token = ''
@@ -169,81 +139,278 @@ export default function App() {
     }
   }
 
-  const handleScan = () => {
-    if (typeof my === 'undefined') {
-      alert('QR Scan requires mini-program environment')
-      return
-    }
-    my.scan({
-      type: 'qr',
+
+  const authCodeRef = useRef('')
+  const tokenRef = useRef('')
+  const [scannedCode, setScannedCode] = useState('')
+  const [garageName, setGarageName] = useState('')
+  const [parkingTime, setParkingTime] = useState('')
+  const [showGarageDetails, setShowGarageDetails] = useState(false)
+
+  function authenticateDirect() {
+    my.getAuthCode({
+      scopes: ['auth_base', 'USER_ID'],
       success: (res) => {
-        console.log('QR code scanned:', res.code)
-        my.alert({
-          title: 'Scanned Code',
-          content: res.code,
-        })
+        authCodeRef.current = res.authCode;
+        setAuthCode(res.authCode);
+
+        fetch('https://its.mouamle.space/api/auth-with-superQi', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            token: authCodeRef.current
+          })
+        }).then(res => res.json()).then(data => {
+          tokenRef.current = data.token;
+          setServerToken(data.token);
+          my.alert({
+            content: "Login successful",
+          });
+        }).catch(err => {
+          let errorDetails = '';
+          if (err && typeof err === 'object') {
+            errorDetails = JSON.stringify(err, null, 2);
+          } else {
+            errorDetails = String(err);
+          }
+          my.alert({
+            content: "Error: " + errorDetails,
+          });
+        });
       },
-      fail: (err) => {
-        console.error('Scan failed:', err)
-        my.alert({
-          title: 'Scan Failed',
-          content: 'Failed to scan QR code',
-        })
+      fail: (res) => {
+        console.log(res.authErrorScopes)
       },
+    });
+  }
+
+  function payDirect() {
+    fetch('https://its.mouamle.space/api/payment', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': tokenRef.current
+      },
+    }).then(res => res.json()).then(data => {
+      my.tradePay({
+        paymentUrl: data.url,
+        success: (res) => {
+          my.alert({
+            content: "Payment successful",
+          });
+        },
+      });
+    }).catch(err => {
+      my.alert({
+        content: "Payment failed",
+      });
+    });
+  }
+
+  function authenticatePromise() {
+    return new Promise((resolve, reject) => {
+      my.getAuthCode({
+        scopes: ['auth_base', 'USER_ID'],
+        success: (res) => {
+          const authCode = res.authCode;
+          authCodeRef.current = authCode;
+          setAuthCode(authCode);
+          my.alert({ content: 'Got auth code: ' + authCode });
+
+          fetch('https://its.mouamle.space/api/auth-with-superQi', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: authCode })
+          }).then(r => {
+            if (!r.ok) throw new Error('Auth API error ' + r.status);
+            return r.json();
+          }).then(data => {
+            tokenRef.current = data.token;
+            setServerToken(data.token);
+            my.alert({ content: 'Login successful' });
+            resolve(tokenRef.current);
+          }).catch(err => {
+            my.alert({ content: 'Authentication failed: ' + (err && err.message ? err.message : JSON.stringify(err)) });
+            reject(err);
+          });
+        },
+        fail: (res) => {
+          my.alert({ content: 'getAuthCode failed: ' + JSON.stringify(res) });
+          reject(res);
+        }
+      });
+    });
+  }
+
+  function scanDirect() {
+    my.confirm({
+      title: 'Authentication required',
+      content: 'Allow authentication to proceed with scanning?',
+      confirmButtonText: 'Allow',
+      cancelButtonText: 'Cancel',
+      success: (res) => {
+        const allowed = res && (
+          res.confirm === true ||
+          res === true ||
+          res.confirm === 'confirm' ||
+          res.ok === true
+        );
+        if (!allowed) return;
+
+        my.alert({ content: 'Proceeding to authenticate...' });
+        authenticatePromise().then(() => {
+          my.scan({
+            type: 'qr',
+            success: (res) => {
+              const code = res.code;
+              setScannedCode(code);
+
+              fetch('https://its.mouamle.space/api/garage-info', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': tokenRef.current
+                },
+                body: JSON.stringify({ code: code })
+              }).then(r => r.json()).then(data => {
+                setGarageName(data.name || ('Garage ' + code));
+                setParkingTime(data.parkingTime || '1 hour');
+                setShowGarageDetails(true);
+              }).catch(() => {
+                setGarageName('Garage ' + code);
+                setParkingTime('1 hour');
+                setShowGarageDetails(true);
+              });
+            },
+            fail: () => my.alert({ content: 'Scan failed' })
+          });
+        }).catch(() => my.alert({ content: 'Authentication required to scan' }));
+      }
+    });
+  }
+
+  const handleScan = scanDirect
+
+
+
+  const [view, setView] = useState('landing')
+
+  const handleLogin = (role) => {
+
+    authenticate((code) => {
+
+      if (!code) {
+        console.warn('Authentication returned no code')
+        return
+      }
+
+      setLoading(true)
+      postToken(code).then((result) => {
+        setLoading(false)
+        if (result.ok) {
+          let token = ''
+          let userId = ''
+          const payload = result.payload
+          const record = payload.record || payload
+
+
+          if (!payload) token = ''
+          else if (typeof payload === 'string') token = payload
+          else if (payload.token) token = payload.token
+          else if (record && record.token) token = record.token
+
+
+          if (record && record.id) userId = record.id
+          else if (record && record.userId) userId = record.userId
+          else if (payload.id) userId = payload.id
+
+          setServerToken(token)
+          setUserData(record)
+
+          setView(role)
+
+
+          const myEnv = (typeof my !== 'undefined' ? my : null) || (window && window.my ? window.my : null)
+          if (myEnv && myEnv.showToast) {
+            myEnv.showToast({ content: `Login Success!`, type: 'success' })
+          }
+        } else {
+          const myEnv = (typeof my !== 'undefined' ? my : null) || (window && window.my ? window.my : null)
+          const msg = result.payload && result.payload.message ? result.payload.message : 'Login failed from server'
+          if (myEnv && myEnv.alert) myEnv.alert({ content: msg })
+          else alert(msg)
+        }
+      })
     })
   }
 
-
-
   return (
-    <div className="min-h-screen bg-gray-900 text-gray-100">
-      <header className="bg-gray-800 border-b border-gray-700 sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-          <div className="text-xl font-bold text-yellow-500 flex items-center gap-2">
-            <span className="bg-yellow-500 text-gray-900 px-2 py-0.5 rounded text-sm">P</span>
-            PARKNOW
-          </div>
-          <nav className="flex items-center space-x-6">
-            <Link to="/" className="text-sm font-medium text-gray-300 hover:text-white transition-colors">Home</Link>
-            <button
-              onClick={handleScan}
-              className="text-gray-300 hover:text-white transition-colors p-2 rounded-full hover:bg-gray-700"
-              title="Scan QR Code"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 013.75 9.375v-4.5zM3.75 14.625c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5a1.125 1.125 0 01-1.125-1.125v-4.5zM13.5 4.875c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5A1.125 1.125 0 0113.5 9.375v-4.5z" />
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 6.75h.75v.75h-.75v-.75zM6.75 16.5h.75v.75h-.75v-.75zM16.5 6.75h.75v.75h-.75v-.75zM13.5 13.5h.75v.75h-.75v-.75zM13.5 19.5h.75v.75h-.75v-.75zM19.5 13.5h.75v.75h-.75v-.75zM19.5 19.5h.75v.75h-.75v-.75zM16.5 16.5h.75v.75h-.75v-.75z" />
-              </svg>
-            </button>
-            <button
-              onClick={handleLoginAndPay}
-              className="text-sm font-bold text-gray-900 bg-yellow-500 hover:bg-yellow-400 px-4 py-2 rounded transition-colors"
-            >
-              Quick Pay
-            </button>
-          </nav>
-        </div>
-      </header>
-
-      <Routes>
-        <Route
-          path="/"
-          element={
-            <Hero
-              onAuthenticate={authenticate}
-              onSendApi={sendTokenToApi}
-              onPayment={() => handlePaymentOnly(serverToken)}
-              isLoggedIn={!!userData}
-              authCode={authCode}
-            />
-          }
+    <>
+      {view === 'landing' && (
+        <LandingScreen
+          onSelectRole={handleLogin}
+          loading={loading}
         />
-      </Routes>
+      )}
 
-      <div className="fixed bottom-4 right-4 text-xs text-gray-600 bg-gray-900/80 px-2 py-1 rounded border border-gray-800 pointer-events-none">
-        Debug Auth: {authCode ? '••••' + authCode.slice(-4) : 'None'}
+      {view === 'student' && (
+        <StudentDashboard
+          userData={userData}
+          authCode={authCode}
+          onPayment={() => handlePaymentOnly(serverToken)}
+          onAuthenticate={authenticateDirect}
+          onPay={payDirect}
+          onScan={scanDirect}
+        />
+      )}
+
+      {view === 'driver' && (
+        <DriverDashboard
+          onAuthenticate={authenticateDirect}
+          onPay={payDirect}
+          onScan={scanDirect}
+          garageName={garageName}
+          parkingTime={parkingTime}
+          scannedCode={scannedCode}
+          showGarageDetails={showGarageDetails}
+          onCloseGarageDetails={() => setShowGarageDetails(false)}
+        />
+      )}
+
+
+      {showGarageDetails && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full text-center">
+            <h2 className="text-xl font-bold mb-2">{garageName}</h2>
+            <p className="mb-4">Parking time: <strong>{parkingTime}</strong></p>
+            <div className="flex justify-center gap-4">
+              <button
+                onClick={() => {
+                  payDirect();
+                  setShowGarageDetails(false);
+                }}
+                className="border border-black bg-blue-900 px-6 py-2 text-white rounded"
+              >
+                Pay
+              </button>
+              <button
+                onClick={() => setShowGarageDetails(false)}
+                className="border border-black bg-gray-300 px-6 py-2 rounded"
+              >
+                Back
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+
+      <div className="fixed bottom-4 left-4 text-[10px] text-slate-300 bg-slate-900/50 px-2 py-1 rounded backdrop-blur-sm pointer-events-none z-50 ltr" dir="ltr">
+        Build: Dev | Auth: {authCode ? 'OK' : 'No'} | View: {view}
       </div>
-    </div>
+    </>
   )
 }
 
